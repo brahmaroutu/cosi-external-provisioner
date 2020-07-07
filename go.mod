@@ -1,4 +1,4 @@
-module github.com/cosi-external-provisioner
+module github.com/brahmaroutu/cosi-external-provisioner
 
 go 1.14
 
