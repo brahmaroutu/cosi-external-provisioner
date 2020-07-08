@@ -47,7 +47,7 @@ import (
     cosiapi "github.com/container-object-storage-interface/api/apis/cosi.sigs.k8s.io/v1alpha1"
     "github.com/container-object-storage-interface/api/client/informers/cosi.sigs.k8s.io/v1alpha1"
     cosiclnt "github.com/container-object-storage-interface/api/client/clientset/typed/cosi.sigs.k8s.io/v1alpha1"
-    "github.com/container-object-storage-interface/api/client/clientset"
+    cosiclient "github.com/container-object-storage-interface/api/client/clientset"
 )
 
 // annClass annotation represents the bucket class associated with a resource:
@@ -67,6 +67,7 @@ var (
 // ProvisionController is a controller that provisions Bucket for BucketRequests.
 type ProvisionController struct {
 	client kubernetes.Interface
+	cosiclient cosiclient.Interface
 
 	// The name of the provisioner for which this controller dynamically
 	// provisions buckets. 
@@ -270,7 +271,8 @@ func (ctrl *ProvisionController) HasRun() bool {
 // NewProvisionController creates a new provision controller using
 // the given configuration parameters and with private (non-shared) informers.
 func NewProvisionController(
-	client kubernetes.Interface,
+	client  kubernetes.Interface,
+	cosiclient  cosiclient.Interface,
 	provisionerName string,
 	provisioner Provisioner,
 	kubeVersion string,
@@ -292,6 +294,7 @@ func NewProvisionController(
 
 	controller := &ProvisionController{
 		client:                    client,
+		cosiclient:                cosiclient,
 		provisionerName:           provisionerName,
 		provisioner:               provisioner,
 		kubeVersion:               utilversion.MustParseSemantic(kubeVersion),
@@ -349,7 +352,7 @@ func NewProvisionController(
 	if controller.bucketRequestInformer != nil {
 		controller.bucketRequestInformer.AddEventHandlerWithResyncPeriod(bucketRequestHandler, controller.resyncPeriod)
 	} else {
-		controller.bucketRequestInformer = v1alpha1.NewBucketRequestInformer(client.(clientset.Interface), "default", controller.resyncPeriod, cache.Indexers{uidIndex: func(obj interface{}) ([]string, error) {
+		controller.bucketRequestInformer = v1alpha1.NewBucketRequestInformer(cosiclient, "default", controller.resyncPeriod, cache.Indexers{uidIndex: func(obj interface{}) ([]string, error) {
                 uid, err := getObjectUID(obj)
                 if err != nil {
                         return nil, err
@@ -379,7 +382,7 @@ func NewProvisionController(
 	if controller.bucketInformer != nil {
 		controller.bucketInformer.AddEventHandlerWithResyncPeriod(bucketHandler, controller.resyncPeriod)
 	} else {
-		controller.bucketInformer = v1alpha1.NewBucketInformer(client.(clientset.Interface),  controller.resyncPeriod, cache.Indexers{uidIndex: func(obj interface{}) ([]string, error) {
+		controller.bucketInformer = v1alpha1.NewBucketInformer(cosiclient,  controller.resyncPeriod, cache.Indexers{uidIndex: func(obj interface{}) ([]string, error) {
                 uid, err := getObjectUID(obj)
                 if err != nil {
                         return nil, err
