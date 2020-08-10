@@ -20,8 +20,8 @@ import (
 	"context"
 	"fmt"
 
+	"github.com/container-object-storage-interface/api/apis/cosi.sigs.k8s.io/v1alpha1"
 	"k8s.io/api/core/v1"
-        "github.com/container-object-storage-interface/api/apis/cosi.sigs.k8s.io/v1alpha1"
 )
 
 // Provisioner is an interface that creates templates for Buckets
@@ -48,7 +48,6 @@ type Qualifier interface {
 	// be attempted.
 	ShouldProvision(context.Context, *v1alpha1.BucketRequest) bool
 }
-
 
 // ProvisioningState is state of bucket provisioning. It tells the controller if
 // provisioning could be in progress in the background after Provision() call

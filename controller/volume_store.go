@@ -22,20 +22,19 @@ import (
 	"sync"
 	"time"
 
+	"github.com/container-object-storage-interface/api/apis/cosi.sigs.k8s.io/v1alpha1"
+	cosiclnt "github.com/container-object-storage-interface/api/clientset/typed/cosi.sigs.k8s.io/v1alpha1"
 	v1 "k8s.io/api/core/v1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/client-go/util/workqueue"
 	"k8s.io/klog"
-	"k8s.io/client-go/rest"
-    "github.com/container-object-storage-interface/api/apis/cosi.sigs.k8s.io/v1alpha1"
-    cosiclnt "github.com/container-object-storage-interface/api/client/clientset/typed/cosi.sigs.k8s.io/v1alpha1"
-
 )
 
 // BucketStore is an interface that's used to save Buckets to API server.
@@ -61,9 +60,9 @@ type BucketStore interface {
 // PVs to API server using a workqueue running in its own goroutine(s).
 // After failed save, bucket is re-qeueued with exponential backoff.
 type queueStore struct {
-	client        kubernetes.Interface
-	queue         workqueue.RateLimitingInterface
-	eventRecorder record.EventRecorder
+	client                kubernetes.Interface
+	queue                 workqueue.RateLimitingInterface
+	eventRecorder         record.EventRecorder
 	bucketRequestsIndexer cache.Indexer
 
 	buckets sync.Map
@@ -80,14 +79,15 @@ func NewBucketStoreQueue(
 ) BucketStore {
 
 	return &queueStore{
-		client:        client,
-		queue:         workqueue.NewNamedRateLimitingQueue(limiter, "unsavedpvs"),
+		client:                client,
+		queue:                 workqueue.NewNamedRateLimitingQueue(limiter, "unsavedpvs"),
 		bucketRequestsIndexer: bucketRequestsIndexer,
-		eventRecorder: eventRecorder,
+		eventRecorder:         eventRecorder,
 	}
 }
 
 func (q *queueStore) StoreBucket(bucketRequest *v1alpha1.BucketRequest, bucket *v1alpha1.Bucket) error {
+	fmt.Println("StoreBucket ", bucketRequest, " bucket ", bucket)
 	if err := q.doSaveBucket(bucket); err != nil {
 		q.buckets.Store(bucket.Name, bucket)
 		q.queue.Add(bucket.Name)
@@ -98,14 +98,14 @@ func (q *queueStore) StoreBucket(bucketRequest *v1alpha1.BucketRequest, bucket *
 }
 
 func (q *queueStore) Run(ctx context.Context, threadiness int) {
-	klog.Infof("Starting save bucket queue")
+	klog.Infof("BucketStore-RUN:Starting save bucket queue %d", threadiness)
 	defer q.queue.ShutDown()
 
 	for i := 0; i < threadiness; i++ {
 		go wait.Until(q.saveBucketWorker, time.Second, ctx.Done())
 	}
 	<-ctx.Done()
-	klog.Infof("Stopped save bucket queue")
+	klog.Infof("BucketStore-RUN: Stopped save bucket queue")
 }
 
 func (q *queueStore) saveBucketWorker() {
@@ -117,6 +117,7 @@ func (q *queueStore) processNextWorkItem() bool {
 	obj, shutdown := q.queue.Get()
 	defer q.queue.Done(obj)
 
+        fmt.Println("BucketStore: processNextWorkItem ", obj, " shutdown ", shutdown)
 	if shutdown {
 		return false
 	}
@@ -157,9 +158,9 @@ func (q *queueStore) processNextWorkItem() bool {
 func (q *queueStore) doSaveBucket(bucket *v1alpha1.Bucket) error {
 	klog.V(5).Infof("Saving bucket %s", bucket.Name)
 	config, err := rest.InClusterConfig()
-    if err != nil {
-            klog.Fatalf("Failed to create config: %v", err)
-    }
+	if err != nil {
+		klog.Fatalf("Failed to create config: %v", err)
+	}
 	_, err = cosiclnt.NewForConfigOrDie(config).Buckets().Create(context.Background(), bucket, metav1.CreateOptions{})
 	if err == nil || apierrs.IsAlreadyExists(err) {
 		klog.V(5).Infof("Bucket %s saved", bucket.Name)

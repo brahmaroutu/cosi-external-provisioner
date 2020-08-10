@@ -34,20 +34,21 @@ import (
 	utilversion "k8s.io/apimachinery/pkg/util/version"
 	"k8s.io/apimachinery/pkg/util/wait"
 	//"k8s.io/client-go/informers"
-	"k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/kubernetes/scheme"
 	corev1 "k8s.io/client-go/kubernetes/typed/core/v1"
 	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	//ref "k8s.io/client-go/tools/reference"
-	"k8s.io/client-go/util/workqueue"
-	"k8s.io/client-go/rest"
-	glog "k8s.io/klog"
 	"github.com/brahmaroutu/cosi-external-provisioner/util"
-    cosiapi "github.com/container-object-storage-interface/api/apis/cosi.sigs.k8s.io/v1alpha1"
-    "github.com/container-object-storage-interface/api/client/informers/cosi.sigs.k8s.io/v1alpha1"
-    cosiclnt "github.com/container-object-storage-interface/api/client/clientset/typed/cosi.sigs.k8s.io/v1alpha1"
-    cosiclient "github.com/container-object-storage-interface/api/client/clientset"
+	cosiapi    "github.com/container-object-storage-interface/api/apis/cosi.sigs.k8s.io/v1alpha1"
+	cosiclient "github.com/container-object-storage-interface/api/clientset"
+	cosiclnt   "github.com/container-object-storage-interface/api/clientset/typed/cosi.sigs.k8s.io/v1alpha1"
+        cosiinformer "github.com/container-object-storage-interface/api/informers/externalversions"
+//        cinformer "github.com/container-object-storage-interface/api/informers/externalversions/cosi.sigs.k8s.io/v1alpha1"
+	"k8s.io/client-go/rest"
+	"k8s.io/client-go/util/workqueue"
+	glog "k8s.io/klog"
 )
 
 // annClass annotation represents the bucket class associated with a resource:
@@ -59,34 +60,34 @@ import (
 // - in Bucket it represents bucketclass to which the bucket belongs.
 const annClass = "cosi.beta.kubernetes.io/bucket-class"
 
-
 var (
 	errStopProvision = errors.New("stop provisioning")
 )
 
 // ProvisionController is a controller that provisions Bucket for BucketRequests.
 type ProvisionController struct {
-	client kubernetes.Interface
+	client     kubernetes.Interface
 	cosiclient cosiclient.Interface
 
 	// The name of the provisioner for which this controller dynamically
-	// provisions buckets. 
+	// provisions buckets.
 	provisionerName string
 
 	// The provisioner the controller will use to provision buckets.
 	provisioner Provisioner
 
 	kubeVersion *utilversion.Version
+    
+    informerFactory   cosiinformer.SharedInformerFactory
 
-	bucketRequestInformer  cache.SharedIndexInformer
-	bucketRequestIndexer   cache.Indexer
-	bucketInformer         cache.SharedInformer
-	bucketClasses          cache.Store
-	buckets                cache.Store
+	bucketRequestInformer cache.SharedIndexInformer
+	bucketRequestIndexer  cache.Indexer
+	bucketInformer        cache.SharedInformer
+	bucketClasses         cache.Store
+	buckets               cache.Store
 
-
-	bucketRequestQueue  workqueue.RateLimitingInterface
-	bucketQueue         workqueue.RateLimitingInterface
+	bucketRequestQueue workqueue.RateLimitingInterface
+	bucketQueue        workqueue.RateLimitingInterface
 
 	// Identity of this controller, generated at creation time and not persisted
 	// across restarts. Useful only for debugging, for seeing the source of
@@ -108,14 +109,14 @@ type ProvisionController struct {
 
 	hasRun     bool
 	hasRunLock *sync.Mutex
- 
-    bucketRequestsInProgress sync.Map
-    bucketStore BucketStore
+
+	bucketRequestsInProgress sync.Map
+	bucketStore              BucketStore
 }
 
 const (
 	// DefaultResyncPeriod is used when option function ResyncPeriod is omitted
-	DefaultResyncPeriod = 15 * time.Minute
+	DefaultResyncPeriod = 1 * time.Minute
 	// DefaultThreadiness is used when option function Threadiness is omitted
 	DefaultThreadiness = 4
 	// DefaultExponentialBackOffOnError is used when option function ExponentialBackOffOnError is omitted
@@ -144,7 +145,7 @@ const (
 	DefaultMetricsPath = "/metrics"
 	// DefaultAddFinalizer is used when option function AddFinalizer is omitted
 	DefaultAddFinalizer = false
-	
+
 	uidIndex = "uid"
 )
 
@@ -199,7 +200,6 @@ func ExponentialBackOffOnError(exponentialBackOffOnError bool) func(*ProvisionCo
 		return nil
 	}
 }
-
 
 // FailedProvisionThreshold is the threshold for max number of retries on
 // failures of Provision. Set to 0 to retry indefinitely. Defaults to 15.
@@ -271,8 +271,8 @@ func (ctrl *ProvisionController) HasRun() bool {
 // NewProvisionController creates a new provision controller using
 // the given configuration parameters and with private (non-shared) informers.
 func NewProvisionController(
-	client  kubernetes.Interface,
-	cosiclient  cosiclient.Interface,
+	client kubernetes.Interface,
+	cosiclient cosiclient.Interface,
 	provisionerName string,
 	provisioner Provisioner,
 	kubeVersion string,
@@ -341,24 +341,27 @@ func NewProvisionController(
 	// BucketRequests
 
 	bucketRequestHandler := cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) { controller.enqueueBucketRequest(obj) },
-		UpdateFunc: func(oldObj, newObj interface{}) { controller.enqueueBucketRequest(newObj) },
+		AddFunc:    func(obj interface{}) { fmt.Println("Add BR"); controller.enqueueBucketRequest(obj) },
+		UpdateFunc: func(oldObj, newObj interface{}) { fmt.Println("Update BR"); controller.enqueueBucketRequest(newObj) },
 		DeleteFunc: func(obj interface{}) {
 			// NOOP. The bucketRequest is either in bucketRequestsInProgress and in the queue, so it will be processed as usual
 			// or it's not in bucketRequestsInProgress and then we don't care
 		},
 	}
+        controller.informerFactory = cosiinformer.NewSharedInformerFactory(cosiclient, controller.resyncPeriod)
 
 	if controller.bucketRequestInformer != nil {
 		controller.bucketRequestInformer.AddEventHandlerWithResyncPeriod(bucketRequestHandler, controller.resyncPeriod)
 	} else {
-		controller.bucketRequestInformer = v1alpha1.NewBucketRequestInformer(cosiclient, "default", controller.resyncPeriod, cache.Indexers{uidIndex: func(obj interface{}) ([]string, error) {
-                uid, err := getObjectUID(obj)
-                if err != nil {
-                        return nil, err
-                }
-                return []string{uid}, nil
-        }})
+/*		controller.bucketRequestInformer = v1alpha1.NewBucketRequestInformer(cosiclient, "default", controller.resyncPeriod, cache.Indexers{uidIndex: func(obj interface{}) ([]string, error) {
+			uid, err := getObjectUID(obj)
+			if err != nil {
+				return nil, err
+			}
+			return []string{uid}, nil
+		}})
+*/
+                controller.bucketRequestInformer = controller.informerFactory.Cosi().V1alpha1().BucketRequests().Informer()
 		controller.bucketRequestInformer.AddEventHandler(bucketRequestHandler)
 	}
 	controller.bucketRequestInformer.AddIndexers(cache.Indexers{uidIndex: func(obj interface{}) ([]string, error) {
@@ -374,27 +377,29 @@ func NewProvisionController(
 	// Bucket
 
 	bucketHandler := cache.ResourceEventHandlerFuncs{
-		AddFunc:    func(obj interface{}) { controller.enqueueBucket(obj) },
-		UpdateFunc: func(oldObj, newObj interface{}) { controller.enqueueBucket(newObj) },
+		AddFunc:    func(obj interface{}) { fmt.Println("Add B"); controller.enqueueBucket(obj) },
+		UpdateFunc: func(oldObj, newObj interface{}) { fmt.Println("Update B"); controller.enqueueBucket(newObj) },
 		//DeleteFunc: func(obj interface{}) { controller.forgetVolume(obj) },
 	}
 
 	if controller.bucketInformer != nil {
 		controller.bucketInformer.AddEventHandlerWithResyncPeriod(bucketHandler, controller.resyncPeriod)
 	} else {
-		controller.bucketInformer = v1alpha1.NewBucketInformer(cosiclient,  controller.resyncPeriod, cache.Indexers{uidIndex: func(obj interface{}) ([]string, error) {
-                uid, err := getObjectUID(obj)
-                if err != nil {
-                        return nil, err
-                }
-                return []string{uid}, nil
-        }})
+                controller.bucketInformer = controller.informerFactory.Cosi().V1alpha1().Buckets().Informer()
+
+/*		controller.bucketInformer = v1alpha1.NewBucketInformer(cosiclient, controller.resyncPeriod, cache.Indexers{uidIndex: func(obj interface{}) ([]string, error) {
+			uid, err := getObjectUID(obj)
+			if err != nil {
+				return nil, err
+			}
+			return []string{uid}, nil
+		}})*/
 		controller.bucketInformer.AddEventHandler(bucketHandler)
 	}
 	controller.buckets = controller.bucketInformer.GetStore()
 
-		controller.bucketStore = NewBucketStoreQueue(client, controller.rateLimiter, controller.bucketRequestIndexer, controller.eventRecorder)
-//		controller.bucketStore = NewBackoffStore(client, controller.eventRecorder, controller.createProvisionedBucketBackoff, controller)
+	controller.bucketStore = NewBucketStoreQueue(client, controller.rateLimiter, controller.bucketRequestIndexer, controller.eventRecorder)
+	//		controller.bucketStore = NewBackoffStore(client, controller.eventRecorder, controller.createProvisionedBucketBackoff, controller)
 
 	return controller
 }
@@ -418,6 +423,7 @@ func getObjectUID(obj interface{}) (string, error) {
 // enqueueBucketRequest takes an obj and converts it into UID that is then put onto bucketrequest work queue.
 func (ctrl *ProvisionController) enqueueBucketRequest(obj interface{}) {
 	uid, err := getObjectUID(obj)
+        fmt.Println("enqueueBucketRequest obj ", obj, " uid ", uid, " err ", err)
 	if err != nil {
 		utilruntime.HandleError(err)
 		return
@@ -432,73 +438,93 @@ func (ctrl *ProvisionController) enqueueBucketRequest(obj interface{}) {
 func (ctrl *ProvisionController) enqueueBucket(obj interface{}) {
 	var key string
 	var err error
+fmt.Println("enqueueBucketRequest obj ", obj)
 	if key, err = cache.DeletionHandlingMetaNamespaceKeyFunc(obj); err != nil {
 		utilruntime.HandleError(err)
 		return
 	}
 	// Re-Adding is harmless but try to add it to the queue only if it is not
 	// already there, because if it is already there we *must* be retrying it
+//fmt.Println("Putting into bucketQueue ", key)
 	if ctrl.bucketQueue.NumRequeues(key) == 0 {
 		ctrl.bucketQueue.Add(key)
 	}
 }
 
 // Run starts all of this controller's control loops
-func (ctrl *ProvisionController) Run(ctx context.Context) {
+func (ctrl *ProvisionController) Run(stopCh <-chan struct{}) {
 	run := func(ctx context.Context) {
 		glog.Infof("Starting provisioner controller %s!", ctrl.component)
+		//fmt.Println("Run the ctrl informers ", ctrl.bucketInformer, " & ", ctrl.bucketRequestInformer)
 		defer utilruntime.HandleCrash()
 		defer ctrl.bucketRequestQueue.ShutDown()
 		defer ctrl.bucketQueue.ShutDown()
+
+                stopCh := ctx.Done()
+                ctrl.informerFactory.Start(stopCh)
+
 
 		ctrl.hasRunLock.Lock()
 		ctrl.hasRun = true
 		ctrl.hasRunLock.Unlock()
 
 
-		if !cache.WaitForCacheSync(ctx.Done(), ctrl.bucketRequestInformer.HasSynced, ctrl.bucketInformer.HasSynced) {
+		if !cache.WaitForCacheSync(stopCh, ctrl.bucketRequestInformer.HasSynced, ctrl.bucketInformer.HasSynced) {
 			return
 		}
+		
+		fmt.Println("Run the Informers")
+		//go ctrl.bucketInformer.Run(ctx.Done())
+		//go ctrl.bucketRequestInformer.Run(ctx.Done())
+
+		fmt.Println("Informers running")
+		fmt.Println("let us run the Workers")
 
 		for i := 0; i < ctrl.threadiness; i++ {
-			go wait.Until(func() { ctrl.runBucketRequestWorker(ctx) }, time.Second, ctx.Done())
-			go wait.Until(func() { ctrl.runBucketWorker(ctx) }, time.Second, ctx.Done())
+			go wait.Until(ctrl.runBucketRequestWorker, time.Second, ctx.Done())
+			go wait.Until(ctrl.runBucketWorker, time.Second, ctx.Done())
 		}
 
 		glog.Infof("Started provisioner controller %s!", ctrl.component)
 
+            fmt.Println("READY TO SELECT")
 		select {}
+            fmt.Println("FINISHED SELECT")
 	}
 
-	go ctrl.bucketStore.Run(ctx, DefaultThreadiness)
+	go ctrl.bucketStore.Run(context.TODO(), DefaultThreadiness)
 
-	run(ctx)
+	fmt.Println("Run controller")
+	run(context.TODO())
+	fmt.Println("Bye from Controller")
 }
 
-func (ctrl *ProvisionController) runBucketRequestWorker(ctx context.Context) {
-	for ctrl.processNextBucketRequestWorkItem(ctx) {
+func (ctrl *ProvisionController) runBucketRequestWorker() {
+	for ctrl.processNextBucketRequestWorkItem() {
 	}
 }
 
-func (ctrl *ProvisionController) runBucketWorker(ctx context.Context) {
-	for ctrl.processNextBucketWorkItem(ctx) {
+func (ctrl *ProvisionController) runBucketWorker() {
+	for ctrl.processNextBucketWorkItem() {
 	}
 }
 
 // processNextBucketRequestWorkItem processes items from bucketRequestQueue
-func (ctrl *ProvisionController) processNextBucketRequestWorkItem(ctx context.Context) bool {
+func (ctrl *ProvisionController) processNextBucketRequestWorkItem() bool {
 	obj, shutdown := ctrl.bucketRequestQueue.Get()
 
+	//fmt.Println("ctrl.bucketRequestQueue.Get returned obj:", obj, " shutdown:", shutdown)
 	if shutdown {
 		return false
 	}
 
+	//fmt.Println("Run processNextBucketRequestWorkItem")
 	err := func() error {
 		// Apply per-operation timeout.
 		if ctrl.provisionTimeout != 0 {
-			timeout, cancel := context.WithTimeout(ctx, ctrl.provisionTimeout)
+			fmt.Println("provision timeout")
+			_, cancel := context.WithTimeout(context.TODO(), ctrl.provisionTimeout)
 			defer cancel()
-			ctx = timeout
 		}
 		defer ctrl.bucketRequestQueue.Done(obj)
 		var key string
@@ -508,7 +534,7 @@ func (ctrl *ProvisionController) processNextBucketRequestWorkItem(ctx context.Co
 			return fmt.Errorf("expected string in workqueue but got %#v", obj)
 		}
 
-		if err := ctrl.syncBucketRequestHandler(ctx, key); err != nil {
+		if err := ctrl.syncBucketRequestHandler(context.TODO(), key); err != nil {
 			if ctrl.failedProvisionThreshold == 0 {
 				glog.Warningf("Retrying syncing bucketRequest %q, failure %v", key, ctrl.bucketRequestQueue.NumRequeues(obj))
 				ctrl.bucketRequestQueue.AddRateLimited(obj)
@@ -533,13 +559,15 @@ func (ctrl *ProvisionController) processNextBucketRequestWorkItem(ctx context.Co
 		return true
 	}
 
+        fmt.Println("Finished processNextBucketWorkItem")
 	return true
 }
 
 // processNextBucketWorkItem processes items from bucketQueue
-func (ctrl *ProvisionController) processNextBucketWorkItem(ctx context.Context) bool {
+func (ctrl *ProvisionController) processNextBucketWorkItem() bool {
 	obj, shutdown := ctrl.bucketQueue.Get()
 
+	//fmt.Println("ctrl.bucketQueue.Get returned obj:", obj, " shutdown:", shutdown)
 	if shutdown {
 		return false
 	}
@@ -547,9 +575,8 @@ func (ctrl *ProvisionController) processNextBucketWorkItem(ctx context.Context) 
 	err := func() error {
 		// Apply per-operation timeout.
 		if ctrl.deletionTimeout != 0 {
-			timeout, cancel := context.WithTimeout(ctx, ctrl.deletionTimeout)
+			_, cancel := context.WithTimeout(context.TODO(), ctrl.deletionTimeout)
 			defer cancel()
-			ctx = timeout
 		}
 		defer ctrl.bucketQueue.Done(obj)
 		var key string
@@ -559,7 +586,7 @@ func (ctrl *ProvisionController) processNextBucketWorkItem(ctx context.Context) 
 			return fmt.Errorf("expected string in workqueue but got %#v", obj)
 		}
 
-		if err := ctrl.syncBucketHandler(ctx, key); err != nil {
+		if err := ctrl.syncBucketHandler(context.TODO(), key); err != nil {
 			if ctrl.failedDeleteThreshold == 0 {
 				glog.Warningf("Retrying syncing bucket %q, failure %v", key, ctrl.bucketQueue.NumRequeues(obj))
 				ctrl.bucketQueue.AddRateLimited(obj)
@@ -583,12 +610,14 @@ func (ctrl *ProvisionController) processNextBucketWorkItem(ctx context.Context) 
 		return true
 	}
 
+ fmt.Println("Finished processNextBucketRequestWorkItem")
 	return true
 }
 
 // syncBucketRequestHandler gets the bucketRequest from informer's cache then calls syncBucketRequest. A non-nil error triggers requeuing of the bucketRequest.
 func (ctrl *ProvisionController) syncBucketRequestHandler(ctx context.Context, key string) error {
 	objs, err := ctrl.bucketRequestIndexer.ByIndex(uidIndex, key)
+        //fmt.Println("syncBuckeRrequestHandler get from indexer ", uidIndex, " key ", key, " returns ", objs, " err ", err)
 	if err != nil {
 		return err
 	}
@@ -609,6 +638,7 @@ func (ctrl *ProvisionController) syncBucketRequestHandler(ctx context.Context, k
 // syncBucketHandler gets the bucket from informer's cache then calls syncbucket
 func (ctrl *ProvisionController) syncBucketHandler(ctx context.Context, key string) error {
 	bucketObj, exists, err := ctrl.buckets.GetByKey(key)
+        //fmt.Println("syncBucketHandler ", bucketObj, " exists ", exists, " err ", err)
 	if err != nil {
 		return err
 	}
@@ -624,16 +654,19 @@ func (ctrl *ProvisionController) syncBucketHandler(ctx context.Context, key stri
 // provisions one if so. Returns an error if the bucketRequest is to be requeued.
 func (ctrl *ProvisionController) syncBucketRequest(ctx context.Context, obj interface{}) error {
 	bucketRequest, ok := obj.(*cosiapi.BucketRequest)
+        //fmt.Println("syncBucketRequest obj ", obj, " ok ", ok)
 	if !ok {
 		return fmt.Errorf("expected bucketRequest but got %+v", obj)
 	}
 
 	should, err := ctrl.shouldProvision(ctx, bucketRequest)
+        //fmt.Println("syncBucketRequest should provision ", should, " err ", err)
 	if err != nil {
 		return err
 	} else if should {
 
 		status, err := ctrl.provisionBucketRequestOperation(ctx, bucketRequest)
+        //fmt.Println("syncBucketRequest provisionBucketRequest ", status, " err ", err)
 		if err == nil || status == ProvisioningFinished {
 			// Provisioning is 100% finished / not in progress.
 			switch err {
@@ -667,10 +700,11 @@ func (ctrl *ProvisionController) syncBucketRequest(ctx context.Context, obj inte
 // syncBucket checks if the bucket should be deleted and deletes if so
 func (ctrl *ProvisionController) syncBucket(ctx context.Context, obj interface{}) error {
 	bucket, ok := obj.(*cosiapi.Bucket)
-	if !ok {
+        //fmt.Println("syncBucket obj ", obj, " ok ", ok)
+	if !ok ||  bucket == nil {
 		return fmt.Errorf("expected bucket but got %+v", obj)
 	}
-    fmt.Println(bucket)
+	//fmt.Println(bucket)
 	return nil
 }
 
@@ -696,20 +730,19 @@ func (ctrl *ProvisionController) shouldProvision(ctx context.Context, bucketRequ
 		}
 	}
 
-//		bucketRequestClass := util.GetBucketRequestClass(bucketRequest)
-/*		class, err := ctrl.getBucketClass(bucketRequestClass)
-		if err != nil {
-			glog.Errorf("Error getting bucketRequest %q's StorageClass's fields: %v", bucketRequestToBucketRequestKey(bucketRequest), err)
-			return false, err
-		}
-		if class.Provisioner != ctrl.provisionerName {
-			return false, nil
-		}
+	//		bucketRequestClass := util.GetBucketRequestClass(bucketRequest)
+	/*		class, err := ctrl.getBucketClass(bucketRequestClass)
+			if err != nil {
+				glog.Errorf("Error getting bucketRequest %q's StorageClass's fields: %v", bucketRequestToBucketRequestKey(bucketRequest), err)
+				return false, err
+			}
+			if class.Provisioner != ctrl.provisionerName {
+				return false, nil
+			}
 
-*/		return true, nil
-	
+	*/return true, nil
 
-//	return false, nil
+	//	return false, nil
 }
 
 // provisionBucketRequestOperation attempts to provision a bucket for the given bucketRequest.
@@ -727,9 +760,10 @@ func (ctrl *ProvisionController) provisionBucketRequestOperation(ctx context.Con
 	//  yet.
 	bucketName := bucketRequest.Name
 	config, err := rest.InClusterConfig()
-    if err != nil {
-            glog.Fatalf("Failed to create config: %v", err)
-    }
+	if err != nil {
+		glog.Fatalf("Failed to create config: %v", err)
+	}
+	//fmt.Println("Get on Buckets ")
 	bucket, err := cosiclnt.NewForConfigOrDie(config).Buckets().Get(ctx, bucketName, metav1.GetOptions{})
 	if err == nil && bucket != nil {
 		// bucket has been already provisioned, nothing to do.
@@ -744,7 +778,7 @@ func (ctrl *ProvisionController) provisionBucketRequestOperation(ctx context.Con
 		glog.Error(logOperation(operation, "unexpected error getting bucketRequest reference: %v", err))
 		return ProvisioningNoChange, err
 	}
-*/
+	*/
 
 	options := ProvisionOptions{
 		BucketName:    bucketName,

@@ -19,7 +19,7 @@ dep:
 
 verify: dep
 	# todo gometalinter is DEPRECATED, Use https://github.com/golangci/golangci-lint
-//	GO111MODULE=off go get -u github.com/alecthomas/gometalinter
+	GO111MODULE=off go get -u github.com/alecthomas/gometalinter
 //	PATH=$$(go env GOPATH)/bin:$$PATH GO111MODULE=off gometalinter --install
 
 test: dep
